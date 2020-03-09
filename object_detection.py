@@ -279,7 +279,7 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
             #player.play(MODEL_LOAD_SOUND)
 
         def take_photo():
-            logger.info('Button pressed.')
+            logger.info('Taking picture.')
             player.play(BEEP_SOUND)
             photographer.shoot(camera)
 
@@ -287,6 +287,8 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
             camera.start_preview(alpha=preview_alpha)
 
         board.button.when_pressed = take_photo
+
+        _last_photo_time = time.monotonic()
 
         #joy_moving_average = moving_average(10)
         #joy_moving_average.send(None)  # Initialize.
@@ -305,6 +307,10 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
             #    player.play(SAD_SOUND)
             if len(objs) > 0:
                 logger.info(f'{len(objs)} objects detected: {objs[0]}, ...')
+                _ctime = time.monotonic()
+                if _ctime - _last_photo_time > 1:
+                    _last_photo_time = _ctime
+                    take_photo()
 
             if server:
                 server.send_overlay(svg_overlay(objs, frame_size))
