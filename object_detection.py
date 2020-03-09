@@ -53,7 +53,7 @@ def stopwatch(message):
 
 
 def run_inference(num_frames, on_loaded):
-    """Yields (faces, (frame_width, frame_height)) tuples."""
+    """Yields (objects, (frame_width, frame_height)) tuples."""
     with CameraInference(object_detection.model()) as inference:
         on_loaded()
         for result in inference.run(num_frames):
@@ -168,7 +168,7 @@ class Photographer(Service):
         assert format in ('jpeg', 'bmp', 'png')
 
         self._font = ImageFont.truetype(FONT_FILE, size=25)
-        self._faces = ([], (0, 0))
+        self._detections = ([], (0, 0))
         self._format = format
         self._folder = folder
 
@@ -176,9 +176,9 @@ class Photographer(Service):
         path = '%s/%s_annotated.%s' if annotated else '%s/%s.%s'
         return os.path.expanduser(path % (self._folder, timestamp, self._format))
 
-    def _draw_face(self, draw, face, scale_x, scale_y):
-        x, y, width, height = scale_bounding_box(face.bounding_box, scale_x, scale_y)
-        text = 'Joy: %.2f' % face.joy_score
+    def _draw_bb(self, draw, obj, scale_x, scale_y):
+        x, y, width, height = scale_bounding_box(obj.bounding_box, scale_x, scale_y)
+        text = f'{obj._LABELS[obj.kind]}: {obj.score:.2f}'
         _, text_height = self._font.getsize(text)
         margin = 3
         bottom = y + height
@@ -189,7 +189,7 @@ class Photographer(Service):
 
     def process(self, message):
         if isinstance(message, tuple):
-            self._faces = message
+            self._detections = message
             return
 
         camera = message
@@ -205,16 +205,16 @@ class Photographer(Service):
             with open(filename, 'wb') as file:
                 file.write(stream.read())
 
-        faces, (width, height) = self._faces
-        if faces:
+        objs, (width, height) = self._detections
+        if objs:
             filename = self._make_filename(timestamp, annotated=True)
             with stopwatch('Saving annotated %s' % filename):
                 stream.seek(0)
                 image = Image.open(stream)
                 draw = ImageDraw.Draw(image)
                 scale_x, scale_y = image.width / width, image.height / height
-                for face in faces:
-                    self._draw_face(draw, face, scale_x, scale_y)
+                for obj in objs:
+                    self._draw_bb(draw, obj, scale_x, scale_y)
                 del draw
                 image.save(filename)
 
@@ -280,7 +280,7 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
 
         def take_photo():
             logger.info('Taking picture.')
-            player.play(BEEP_SOUND)
+            #player.play(BEEP_SOUND)
             photographer.shoot(camera)
 
         if preview_alpha > 0:
@@ -309,8 +309,8 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
                 logger.info(f'{len(objs)} objects detected: {objs[0]}, ...')
                 _ctime = time.monotonic()
                 if _ctime - _last_photo_time > 1:
-                    _last_photo_time = _ctime
                     take_photo()
+                    _last_photo_time = time.monotonic()
 
             if server:
                 server.send_overlay(svg_overlay(objs, frame_size))
