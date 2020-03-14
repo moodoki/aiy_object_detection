@@ -93,7 +93,7 @@ def scale_bounding_box(bounding_box, scale_x, scale_y):
     x, y, w, h = bounding_box
     return (x * scale_x, y * scale_y, w * scale_x, h * scale_y)
 
-def svg_overlay(objects, frame_size):
+def svg_overlay(objects, frame_size, iso, d_gain, a_gain):
     width, height = frame_size
     doc = svg.Svg(width=width, height=height)
 
@@ -107,7 +107,9 @@ def svg_overlay(objects, frame_size):
                          fill='yellow', font_size=30))
 
     doc.add(svg.Text('Objects: %d' % (len(objects)),
-            x=10, y=50, fill='yellow', font_size=40))
+                     x=10, y=50, fill='yellow', font_size=40))
+    doc.add(svg.Text(f'ISO:{iso}, gains: (D {d_gain}), (A {a_gain})',
+                     x=10, y=height, fill='white', font_size=20))
     return str(doc)
 
 
@@ -318,6 +320,12 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
 
         _last_photo_time = time.monotonic()
 
+        logger.info(f'Setting camera parameters...')
+        camera.exposure_mode = 'sports'
+        camera.drc_strength = 'high'
+        camera.meter_mode= 'matrix'
+        logger.info(f'Done.')
+
         #joy_moving_average = moving_average(10)
         #joy_moving_average.send(None)  # Initialize.
         #joy_threshold_detector = threshold_detector(JOY_SCORE_LOW, JOY_SCORE_HIGH)
@@ -341,7 +349,8 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
                     _last_photo_time = time.monotonic()
 
             if server:
-                server.send_overlay(svg_overlay(objs, frame_size))
+                server.send_overlay(svg_overlay(objs, frame_size,
+                                                camera.iso, camera.digital_gain, camera.analog_gain))
 
             if done.is_set():
                 break
