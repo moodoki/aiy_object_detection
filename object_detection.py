@@ -12,6 +12,7 @@ import signal
 import sys
 import threading
 import time
+import json
 
 from PIL import Image, ImageDraw, ImageFont
 from picamera import PiCamera
@@ -159,11 +160,29 @@ class Player(Service):
     def play(self, sound):
         self.submit(sound)
 
+def detections_to_dict(detections):
+    objs, (width, height) = detections
+    results_dict = {'img_width': width,
+                    'img_height': height,
+                    'num_detections': len(objs),
+                    'labels':objs[0]._LABELS,
+                    'objects': [obj_to_dict(obj) for obj in objs]
+                   }
+    return results_dict
+
+
+def obj_to_dict(obj):
+    return {'labels': obj._LABELS,
+            'class': obj.kind,
+            'score': obj.score,
+            'bbox': obj.bounding_box,
+           }
+
 
 class Photographer(Service):
     """Saves photographs to disk."""
 
-    def __init__(self, format, folder):
+    def __init__(self, format, folder, save_annotated=False):
         super().__init__()
         assert format in ('jpeg', 'bmp', 'png')
 
@@ -172,9 +191,12 @@ class Photographer(Service):
         self._format = format
         self._folder = folder
 
-    def _make_filename(self, timestamp, annotated):
+        self.save_annotated = save_annotated
+
+    def _make_filename(self, timestamp, annotated=False, json=False):
         path = '%s/%s_annotated.%s' if annotated else '%s/%s.%s'
-        return os.path.expanduser(path % (self._folder, timestamp, self._format))
+        ext = 'json' if json else self._format
+        return os.path.expanduser(path % (self._folder, timestamp, ext))
 
     def _draw_bb(self, draw, obj, scale_x, scale_y):
         x, y, width, height = scale_bounding_box(obj.bounding_box, scale_x, scale_y)
@@ -207,16 +229,22 @@ class Photographer(Service):
 
         objs, (width, height) = self._detections
         if objs:
-            filename = self._make_filename(timestamp, annotated=True)
-            with stopwatch('Saving annotated %s' % filename):
-                stream.seek(0)
-                image = Image.open(stream)
-                draw = ImageDraw.Draw(image)
-                scale_x, scale_y = image.width / width, image.height / height
-                for obj in objs:
-                    self._draw_bb(draw, obj, scale_x, scale_y)
-                del draw
-                image.save(filename)
+            filename = self._make_filename(timestamp, json=True)
+            with stopwatch(f'Saving detection metadata {filename}'):
+                with open(filename, 'w') as file:
+                    json.dump(detections_to_dict(self._detections), file, indent=2)
+
+            if self.save_annotated:
+                filename = self._make_filename(timestamp, annotated=True)
+                with stopwatch('Saving annotated %s' % filename):
+                    stream.seek(0)
+                    image = Image.open(stream)
+                    draw = ImageDraw.Draw(image)
+                    scale_x, scale_y = image.width / width, image.height / height
+                    for obj in objs:
+                        self._draw_bb(draw, obj, scale_x, scale_y)
+                    del draw
+                    image.save(filename)
 
     def update_detections(self, objects):
         self.submit(objects)
