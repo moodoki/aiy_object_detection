@@ -305,7 +305,7 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
             #elif event == 'low':
             #    logger.info('Low joy detected.')
             #    player.play(SAD_SOUND)
-            if len(objs) > 0:
+            if len(objs) > 0 and any(obj.score>0.5 for obj in objs):
                 logger.info(f'{len(objs)} objects detected: {objs[0]}, ...')
                 _ctime = time.monotonic()
                 if _ctime - _last_photo_time > 1:
