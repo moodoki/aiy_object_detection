@@ -321,7 +321,7 @@ def obj_detector(num_frames, preview_alpha, image_format, image_folder,
         _last_photo_time = time.monotonic()
 
         logger.info(f'Setting camera parameters...')
-        camera.exposure_mode = 'sports'
+        camera.exposure_mode = 'night'
         camera.drc_strength = 'high'
         camera.meter_mode= 'matrix'
         logger.info(f'Done.')
