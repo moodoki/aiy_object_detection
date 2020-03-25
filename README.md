@@ -41,6 +41,7 @@ sudo apt-get install -y aiy-bt-prov-server
 sudo apt-get install -y aiy-vision-dkms
 sudo apt-get install -y aiy-models
 sudo apt-get install -y aiy-python-wheels
+sudo apt-get install -y libopenjp2-tools libopenjp2-7-dev python3-picamera
 ```
 8. reboot
 9. Check myraid
@@ -51,7 +52,11 @@ dmesg | grep -i "Myriad ready"
 ```
 ssh pi@raspberrypi.local "raspivid --nopreview --timeout 0 -o -" | ffplay -loglevel panic -
 ```
-11. Clone AIY repo (optional, maybe run tests)
+11. Clone AIY repo, install in editable mode
+```
+git clone https://github.com/google/aiyprojects-raspbian.git AIY-projects-python
+sudo pip3 install -e AIY-projects-python
+```
 12. Clone this repo
 13. run the setup script
 
