@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Person, Cat, Dog Detector"""
+import argparse
+import collections
+import contextlib
+import io
+import logging
+import math
+import os
+import queue
+import signal
+import sys
+import threading
+import time
+import json
+
+from PIL import Image, ImageDraw, ImageFont
+from picamera import PiCamera
+
+from aiy.vision.models import object_detection
+from aiy.vision.streaming.server import StreamingServer
+from aiy.vision.streaming import svg
+
+logger = logging.getLogger(__name__)
+
+#JOY_COLOR = (255, 70, 0)
+#SAD_COLOR = (0, 0, 64)
+#
+#JOY_SCORE_HIGH = 0.85
+#JOY_SCORE_LOW = 0.10
+#
+#JOY_SOUND = ('C5q', 'E5q', 'C6q')
+#SAD_SOUND = ('C6q', 'E5q', 'C5q')
+MODEL_LOAD_SOUND = ('C6w', 'c6w', 'C6w')
+BEEP_SOUND = ('E6q', 'C6q')
+
+FONT_FILE = '/usr/share/fonts/truetype/freefont/FreeSans.ttf'
+
+BUZZER_GPIO = 22
+
+@contextlib.contextmanager
+def stopwatch(message):
+    try:
+        logger.info('%s...', message)
+        begin = time.monotonic()
+        yield
+    finally:
+        end = time.monotonic()
+        logger.info('%s done. (%fs)', message, end - begin)
+
+
+def draw_rectangle(draw, x0, y0, x1, y1, border, fill=None, outline=None):
+    assert border % 2 == 1
+    for i in range(-border // 2, border // 2 + 1):
+        draw.rectangle((x0 + i, y0 + i, x1 - i, y1 - i), fill=fill, outline=outline)
+
+def svg_overlay(objects, frame_size, iso, d_gain, a_gain):
+    width, height = frame_size
+    doc = svg.Svg(width=width, height=height)
+
+    for obj in objects:
+        x, y, w, h = obj.bounding_box
+        doc.add(svg.Rect(x=int(x), y=int(y), width=int(w), height=int(h), rx=10, ry=10,
+                         fill_opacity=0.3 * obj.score,
+                         style='fill:red;stroke:white;stroke-width:4px'))
+
+        doc.add(svg.Text(f'{obj._LABELS[obj.kind]}: {obj.score:.2f}', x=x, y=y+h - 10,
+                         fill='yellow', font_size=30))
+
+    doc.add(svg.Text('Objects: %d' % (len(objects)),
+                     x=10, y=50, fill='yellow', font_size=40))
+    doc.add(svg.Text(f'ISO:{iso}, gains: (D {d_gain}), (A {a_gain})',
+                     x=10, y=height, fill='white', font_size=20))
+    return str(doc)
+
+
+class Service:
+
+    def __init__(self):
+        self._requests = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            request = self._requests.get()
+            if request is None:
+                self.shutdown()
+                break
+            self.process(request)
+            self._requests.task_done()
+
+    def process(self, request):
+        pass
+
+    def shutdown(self):
+        pass
+
+    def submit(self, request):
+        self._requests.put(request)
+
+    def close(self):
+        self._requests.put(None)
+        self._thread.join()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.close()
+
+
+class Photographer(Service):
+    """Saves photographs to disk."""
+
+    def __init__(self, format, folder, save_annotated=False):
+        super().__init__()
+        assert format in ('jpeg', 'bmp', 'png')
+
+        self._font = ImageFont.truetype(FONT_FILE, size=25)
+        self._detections = ([], (0, 0))
+        self._format = format
+        self._folder = folder
+
+        self.save_annotated = save_annotated
+
+    def _make_filename(self, timestamp, annotated=False, json=False):
+        path = '%s/%s_annotated.%s' if annotated else '%s/%s.%s'
+        ext = 'json' if json else self._format
+        return os.path.expanduser(path % (self._folder, timestamp, ext))
+
+    def _draw_bb(self, draw, obj, scale_x, scale_y):
+        x, y, width, height = scale_bounding_box(obj.bounding_box, scale_x, scale_y)
+        text = f'{obj._LABELS[obj.kind]}: {obj.score:.2f}'
+        _, text_height = self._font.getsize(text)
+        margin = 3
+        bottom = y + height
+        text_bottom = bottom + margin + text_height + margin
+        draw_rectangle(draw, x, y, x + width, bottom, 3, outline='white')
+        draw_rectangle(draw, x, bottom, x + width, text_bottom, 3, fill='white', outline='white')
+        draw.text((x + 1 + margin, y + height + 1 + margin), text, font=self._font, fill='black')
+
+    def process(self, message):
+        if isinstance(message, tuple):
+            self._detections = message
+            return
+
+        camera = message
+        timestamp = time.strftime('%Y-%m-%d_%H.%M.%S')
+
+        stream = io.BytesIO()
+        with stopwatch('Taking photo'):
+            camera.capture(stream, format=self._format, use_video_port=True)
+
+        filename = self._make_filename(timestamp, annotated=False)
+        with stopwatch('Saving original %s' % filename):
+            stream.seek(0)
+            with open(filename, 'wb') as file:
+                file.write(stream.read())
+
+        objs, (width, height) = self._detections
+        if objs:
+            filename = self._make_filename(timestamp, json=True)
+            with stopwatch(f'Saving detection metadata {filename}'):
+                with open(filename, 'w') as file:
+                    json.dump(detections_to_dict(self._detections), file, indent=2)
+
+            if self.save_annotated:
+                filename = self._make_filename(timestamp, annotated=True)
+                with stopwatch('Saving annotated %s' % filename):
+                    stream.seek(0)
+                    image = Image.open(stream)
+                    draw = ImageDraw.Draw(image)
+                    scale_x, scale_y = image.width / width, image.height / height
+                    for obj in objs:
+                        self._draw_bb(draw, obj, scale_x, scale_y)
+                    del draw
+                    image.save(filename)
+
+    def update_detections(self, objects):
+        self.submit(objects)
+
+    def shoot(self, camera):
+        self.submit(camera)
+
+
+class Animator(Service):
+    """Controls RGB LEDs."""
+
+    def __init__(self, leds):
+        super().__init__()
+        self._leds = leds
+
+    def process(self, det_score):
+        if det_score > 0.5:
+            self._leds.update(Leds.rgb_on(Color.blend(HDET_COLOR, LDET_COLOR, det_score)))
+        else:
+            self._leds.update(Leds.rgb_off())
+
+    def shutdown(self):
+        self._leds.update(Leds.rgb_off())
+
+    def update_det_score(self, det_score):
+        self.submit(det_score)
+
+
+#def obj_detector(num_frames, preview_alpha, image_format, image_folder,
+def cam_streamer(num_frames, preview_alpha, image_format, image_folder,
+                 enable_streaming, streaming_bitrate, mdns_name):
+    done = threading.Event()
+    def stop():
+        logger.info('Stopping...')
+        done.set()
+
+    signal.signal(signal.SIGINT, lambda signum, frame: stop())
+    signal.signal(signal.SIGTERM, lambda signum, frame: stop())
+
+    logger.info('Starting...')
+    with contextlib.ExitStack() as stack:
+        photographer = stack.enter_context(Photographer(image_format, image_folder))
+        # Forced sensor mode, 1640x1232, full FoV. See:
+        # https://picamera.readthedocs.io/en/release-1.13/fov.html#sensor-modes
+        # This is the resolution inference run on.
+        # Use half of that for video streaming (820x616).
+        camera = stack.enter_context(PiCamera(sensor_mode=4, resolution=(820, 616)))
+        #stack.enter_context(PrivacyLed(leds))
+
+        server = None
+        if enable_streaming:
+            server = stack.enter_context(StreamingServer(camera, bitrate=streaming_bitrate,
+                                                         mdns_name=mdns_name))
+
+        def take_photo():
+            logger.info('Taking picture.')
+            photographer.shoot(camera)
+
+        if preview_alpha > 0:
+            camera.start_preview(alpha=preview_alpha)
+
+        _last_photo_time = time.monotonic()
+
+        logger.info(f'Setting camera parameters...')
+        camera.exposure_mode = 'night'
+        camera.drc_strength = 'high'
+        camera.meter_mode= 'matrix'
+        logger.info(f'Done.')
+
+        #for objs, frame_size in run_inference(num_frames, model_loaded):
+        #    photographer.update_detections((objs, frame_size))
+        #    #joy_score = joy_moving_average.send(average_joy_score(faces))
+        #    #animator.update_joy_score(joy_score)
+        #    #event = joy_threshold_detector.send(joy_score)
+        #    #if event == 'high':
+        #    #    logger.info('High joy detected.')
+        #    #    player.play(JOY_SOUND)
+        #    #elif event == 'low':
+        #    #    logger.info('Low joy detected.')
+        #    #    player.play(SAD_SOUND)
+        #    if len(objs) > 0 and any(obj.score>0.5 for obj in objs):
+        #        logger.info(f'{len(objs)} objects detected: {objs[0]}, ...')
+        #        _ctime = time.monotonic()
+        #        if _ctime - _last_photo_time > 1:
+        #            take_photo()
+        #            _last_photo_time = time.monotonic()
+
+        #    if server:
+        #        server.send_overlay(svg_overlay(objs, frame_size,
+        #                                        camera.iso, camera.digital_gain, camera.analog_gain))
+
+        #    if done.is_set():
+        #        break
+        while not done.is_set():
+            time.sleep(1)
+
+def preview_alpha(string):
+    value = int(string)
+    if value < 0 or value > 255:
+        raise argparse.ArgumentTypeError('Must be in [0...255] range.')
+    return value
+
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--num_frames', '-n', type=int, default=None,
+                        help='Number of frames to run for')
+    parser.add_argument('--preview_alpha', '-pa', type=preview_alpha, default=0,
+                        help='Video preview overlay transparency (0-255)')
+    parser.add_argument('--image_format', default='jpeg',
+                        choices=('jpeg', 'bmp', 'png'),
+                        help='Format of captured images')
+    parser.add_argument('--image_folder', default='~/Pictures',
+                        help='Folder to save captured images')
+    parser.add_argument('--blink_on_error', default=False, action='store_true',
+                        help='Blink red if error occurred')
+    parser.add_argument('--enable_streaming', default=False, action='store_true',
+                        help='Enable streaming server')
+    parser.add_argument('--streaming_bitrate', type=int, default=1000000,
+                        help='Streaming server video bitrate (kbps)')
+    parser.add_argument('--mdns_name', default='',
+                        help='Streaming server mDNS name')
+    args = parser.parse_args()
+
+    try:
+        obj_detector(args.num_frames, args.preview_alpha, args.image_format, args.image_folder,
+                     args.enable_streaming, args.streaming_bitrate, args.mdns_name)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        logger.exception('Exception while running joy demo.')
+        if args.blink_on_error:
+            with Leds() as leds:
+                leds.pattern = Pattern.blink(100)  # 10 Hz
+                leds.update(Leds.rgb_pattern(Color.RED))
+                time.sleep(1.0)
+
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())
