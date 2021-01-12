@@ -9,12 +9,14 @@ from the Pi Camera module.
 Brief Instructions
 ------------------
 
-1. Start off from  Raspbian Buter Lite (image)[https://www.raspberrypi.org/downloads/raspbian/]
+1. Start off from  Raspbian Buter Lite [image](https://www.raspberrypi.org/downloads/raspbian/)
 2. `touch ssh` on boot partition
 3. Edit `config.txt`, add/uncomment:
 ```
 dtparam=i2c_arm=on
 dtparam=spi=on
+
+dtoverlay=spi0-1cs,cs0_pin=7
 
 start_x=1
 gpu_mem=128
@@ -23,7 +25,7 @@ force_turbo=1
 ```
 4. SDCard can be used now
 5. Add AIY repo and update (more
-   (details)[https://github.com/google/aiyprojects-raspbian/blob/aiyprojects/HACKING.md])
+   [details](https://github.com/google/aiyprojects-raspbian/blob/aiyprojects/HACKING.md))
 ```
 echo "deb https://packages.cloud.google.com/apt aiyprojects-stable main" | sudo tee /etc/apt/sources.list.d/aiyprojects.list
 curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
@@ -77,3 +79,17 @@ Troubleshooting
 
 Some Pi Zeros W seems to crash whenever the camera is started in video mode.
 adding `force_turbo=1` and `over_voltage=4` to `config.txt` seems to fix this.
+
+### Updating to kernel >5.4
+Updating to kernel version since 5.4 broke stuff. You might see this error in dmesg
+```
+[   22.916376] aiy-vision spi0.0: Initializing
+[   22.953140] aiy-io-i2c 1-0051: Setting board type vision
+[   23.014899] aiy-io-i2c 1-0051: Driver loaded
+[   23.024505] aiy-vision spi0.0: Failed to bind vision GPIOs: -16
+[   23.035478] aiy-vision: probe of spi0.0 failed with error -16
+```
+To fix this, add this to /boot/config.txt
+```
+dtoverlay=spi0-1cs,cs0_pin=7
+```
